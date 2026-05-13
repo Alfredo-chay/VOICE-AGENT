@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Header, Controls, PipelineCard, ActivityFeed, Console } from './lib/components';
+  import { Header, Controls, PipelineCard, ActivityFeed, Console, Order } from './lib/components';
   import { createVoiceSession } from './lib/websocket';
 
   const voiceSession = createVoiceSession();
@@ -9,6 +9,7 @@
   <Header />
   <Controls onStart={() => voiceSession.start()} onStop={() => voiceSession.stop()} />
   <PipelineCard />
+  <Order />
   <ActivityFeed />
   <Console />
 </div>

@@ -7,6 +7,7 @@ import {
   activities,
   logs,
 } from "./stores";
+import { order } from "./stores/order";
 import { createAudioCapture, createAudioPlayback } from "./audio";
 import { get } from "svelte/store";
 
@@ -61,6 +62,13 @@ export function createVoiceSession(): VoiceSession {
       case "tool_result":
         activities.add("tool", `Tool Result: ${event.name}`, event.result);
         logs.log(`Tool result: ${event.result}`);
+        // Try to update the order store if the tool result contains order info
+        try {
+          order.addFromToolResult(event.result);
+          order.confirmFromToolResult(event.result);
+        } catch (e) {
+          // ignore
+        }
         break;
 
       case "tts_chunk": {
@@ -99,6 +107,7 @@ export function createVoiceSession(): VoiceSession {
     waterfallData.set(null);
     activities.clear();
     logs.clear();
+    order.reset();
     audioPlayback.stop();
 
     session.setStatus("connecting");

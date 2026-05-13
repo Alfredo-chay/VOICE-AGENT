@@ -1,5 +1,7 @@
 import WebSocket from "ws";
 import { writableIterator } from "../utils";
+import fs from "node:fs";
+import path from "node:path";
 import type { AssemblyAISTTMessage } from "./api-types";
 import type { VoiceAgentEvent } from "../types";
 
@@ -35,6 +37,7 @@ interface AssemblyAISTTOptions {
 
 export class AssemblyAISTT {
   apiKey: string;
+  disabled: boolean = false;
   sampleRate: number;
   formatTurns: boolean;
   speechModel: string;
@@ -121,6 +124,28 @@ export class AssemblyAISTT {
 
   constructor(options: AssemblyAISTTOptions) {
     this.apiKey = options.apiKey || process.env.ASSEMBLYAI_API_KEY || "";
+    // Fallback: search upward for a .env file and read ASSEMBLYAI_API_KEY if present
+    if (!this.apiKey) {
+      try {
+        const maxUp = 6;
+        for (let i = 1; i <= maxUp && !this.apiKey; i++) {
+          const parts = Array(i).fill("..");
+          const candidate = path.join(__dirname, ...parts, ".env");
+          console.log(`[AssemblyAISTT] checking .env candidate: ${candidate}`);
+          if (fs.existsSync(candidate)) {
+            const content = fs.readFileSync(candidate, "utf8");
+            const match = content.match(/^ASSEMBLYAI_API_KEY=(.+)$/m);
+            if (match) {
+              console.log(`[AssemblyAISTT] found ASSEMBLYAI_API_KEY in ${candidate}`);
+              this.apiKey = match[1].trim();
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
     this.sampleRate = options.sampleRate || 16000;
     this.formatTurns = options.formatTurns || true;
     this.speechModel =
@@ -147,16 +172,23 @@ export class AssemblyAISTT {
     }
 
     if (!this.apiKey) {
-      throw new Error("AssemblyAI API key is required");
+      // Do not throw: allow server to run even if STT isn't available.
+      console.warn("AssemblyAI API key not found — STT disabled.");
+      this.disabled = true;
     }
   }
 
   async sendAudio(buffer: Uint8Array): Promise<void> {
+    if (this.disabled) return;
     const conn = await this._connection;
     conn.send(buffer);
   }
 
   async *receiveEvents(): AsyncGenerator<VoiceAgentEvent.STTEvent> {
+    if (this.disabled) {
+      // no events
+      return;
+    }
     yield* this._bufferIterator;
   }
 

@@ -23,7 +23,7 @@ import type { VoiceAgentEvent } from "./types";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const STATIC_DIR = path.join(__dirname, "../../web/dist");
-const PORT = parseInt(process.env.PORT ?? "8000");
+const PORT = parseInt(process.env.PORT ?? "8001");
 
 if (!existsSync(STATIC_DIR)) {
   console.error(
@@ -37,6 +37,40 @@ const app = new Hono();
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
 
 app.use("/*", cors());
+
+// ============================================================
+// Kitchen Display System (KDS) - Order Management
+// ============================================================
+
+type Pedido = {
+  id: string;
+  items: string[];
+  time: string;
+  estado: "nuevo" | "en preparación" | "listo";
+};
+
+const pedidos: Pedido[] = [];
+const kitchenClients: Set<WSContext<WebSocket>> = new Set();
+
+// Utility function to broadcast events to all connected kitchen clients
+function broadcastKitchen(event: any) {
+  for (const ws of kitchenClients) {
+    if (ws.raw?.readyState === 1) ws.send(JSON.stringify(event));
+  }
+}
+
+// Create a new order and broadcast it to the kitchen
+function confirmarPedido(items: string[]) {
+  const pedido: Pedido = {
+    id: uuidv4(),
+    items,
+    time: new Date().toLocaleTimeString(),
+    estado: "nuevo",
+  };
+  pedidos.push(pedido);
+  broadcastKitchen({ type: "pedido_nuevo", pedido });
+  return pedido;
+}
 
 const addToOrder = tool(
   async ({ item, quantity }) => {
@@ -54,7 +88,13 @@ const addToOrder = tool(
 
 const confirmOrder = tool(
   async ({ orderSummary }) => {
-    return `Order confirmed: ${orderSummary}. Sending to kitchen.`;
+    // Build a simple item list from natural-language summaries.
+    const items = orderSummary
+      .split(/,| and /i)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const pedido = confirmarPedido(items);
+    return `Order confirmed: ${orderSummary}. Order ID: ${pedido.id}. Sending to kitchen.`;
   },
   {
     name: "confirm_order",
@@ -77,7 +117,7 @@ ${CARTESIA_TTS_SYSTEM_PROMPT}
 `;
 
 const agent = createAgent({
-  model: "claude-haiku-4-5",
+  model: "gpt-4o-mini",
   tools: [addToOrder, confirmOrder],
   checkpointer: new MemorySaver(),
   systemPrompt: systemPrompt,
@@ -322,6 +362,89 @@ app.get(
         inputStream.cancel();
         await flushPromise;
       },
+    };
+  })
+);
+
+// Test endpoint for direct text message processing (no microphone required)
+app.post("/api/test-message", async (c) => {
+  try {
+    const { message } = await c.req.json();
+    if (!message || typeof message !== "string") {
+      return c.json({ error: "message field is required" }, 400);
+    }
+
+    const threadId = uuidv4();
+    const response: { type: string; result?: string; name?: string; text?: string }[] = [];
+
+    const stream = await agent.stream(
+      { messages: [new HumanMessage(message)] },
+      {
+        configurable: { thread_id: threadId },
+        streamMode: "messages",
+      }
+    );
+
+    for await (const [message] of stream) {
+      if (AIMessage.isInstance(message) && message.tool_calls) {
+        response.push({ type: "agent_chunk", text: message.text });
+        for (const toolCall of message.tool_calls) {
+          response.push({
+            type: "tool_call",
+            name: toolCall.name,
+            result: JSON.stringify(toolCall.args),
+          });
+        }
+      }
+      if (ToolMessage.isInstance(message)) {
+        response.push({
+          type: "tool_result",
+          name: message.name ?? "unknown",
+          result:
+            typeof message.content === "string"
+              ? message.content
+              : JSON.stringify(message.content),
+        });
+      }
+    }
+
+    return c.json({ success: true, events: response });
+  } catch (error) {
+    console.error("Test message error:", error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// ============================================================
+// WebSocket endpoint for Kitchen Display System
+// ============================================================
+app.get(
+  "/ws/kitchen",
+  upgradeWebSocket(async () => {
+    return {
+      onOpen(_, ws) {
+        kitchenClients.add(ws);
+        // Send all existing orders when client connects
+        ws.send(JSON.stringify({ type: "todos_pedidos", pedidos }));
+      },
+      onMessage(event) {
+        if (typeof event.data !== "string") {
+          return;
+        }
+
+        const data = JSON.parse(event.data);
+        // Update order status
+        if (data.type === "actualizar_estado") {
+          const pedido = pedidos.find(p => p.id === data.id);
+          if (pedido) {
+            pedido.estado = data.estado;
+            broadcastKitchen({ type: "pedido_actualizado", pedido });
+          }
+        }
+      },
+      onClose(_, ws) {
+        kitchenClients.delete(ws);
+      }
     };
   })
 );

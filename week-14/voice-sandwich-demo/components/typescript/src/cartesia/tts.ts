@@ -1,5 +1,7 @@
 import WebSocket from "ws";
 import { writableIterator } from "../utils";
+import fs from "node:fs";
+import path from "node:path";
 import type {
   CartesiaTTSRequest,
   CartesiaTTSResponse,
@@ -35,6 +37,7 @@ export class CartesiaTTS {
   encoding: CartesiaOutputFormat["encoding"];
   language: string;
   cartesiaVersion: string;
+  disabled: boolean = false;
 
   protected _bufferIterator = writableIterator<VoiceAgentEvent.TTSChunk>();
   protected _connectionPromise: Promise<WebSocket> | null = null;
@@ -101,8 +104,32 @@ export class CartesiaTTS {
 
   constructor(options: CartesiaTTSOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.CARTESIA_API_KEY ?? "";
+    // Fallback: search upward for a .env file if env var is not set
     if (!this.apiKey) {
-      throw new Error("Cartesia API key is required");
+      try {
+        const maxUp = 6;
+        for (let i = 1; i <= maxUp && !this.apiKey; i++) {
+          const parts = Array(i).fill('..');
+          const candidate = path.join(__dirname, ...parts, '.env');
+          if (fs.existsSync(candidate)) {
+            const content = fs.readFileSync(candidate, 'utf8');
+            const match = content.match(/^CARTESIA_API_KEY=(.+)$/m);
+            if (match) {
+              this.apiKey = match[1].trim();
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!this.apiKey) {
+      // Do not throw: allow server to run in environments without Cartesia key.
+      // Mark as disabled; sendText and receiveEvents become no-ops.
+      console.warn("Cartesia API key not found — TTS disabled.");
+      this.disabled = true;
     }
     this.voiceId =
       options.voiceId ?? process.env.CARTESIA_VOICE_ID ?? "162e0f37-8504-474c-bb33-c606c01890dc";
@@ -114,9 +141,8 @@ export class CartesiaTTS {
   }
 
   async sendText(text: string): Promise<void> {
-    if (!text || !text.trim()) {
-      return;
-    }
+    if (this.disabled) return;
+    if (!text || !text.trim()) return;
 
     const conn = await this._connection;
     if (conn.readyState === WebSocket.OPEN) {
@@ -144,10 +170,15 @@ export class CartesiaTTS {
   }
 
   async *receiveEvents(): AsyncGenerator<VoiceAgentEvent.TTSChunk> {
+    if (this.disabled) {
+      // empty generator
+      return;
+    }
     yield* this._bufferIterator;
   }
 
   async close(): Promise<void> {
+    if (this.disabled) return;
     if (this._connectionPromise) {
       const ws = await this._connectionPromise;
       ws.close();
